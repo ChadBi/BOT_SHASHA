@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project config with secrets (DO NOT commit)
+BOT/config/bot_settings.json
+
+# Local scratch / experiments
+BOT/111.json
+
+# Logs / runtime artifacts
+log/
+BOT/log/
+runtime/NapCatQQ/logs/
+runtime/NapCatQQ/cache/
+runtime/NapCatQQ/tmp/
+
+# Generic secret patterns
+**/*secret*.json
+**/*_local.json
