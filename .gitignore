@@ -37,3 +37,5 @@ runtime/NapCatQQ/tmp/
 # Generic secret patterns
 **/*secret*.json
 **/*_local.json
+
+#bot_settings.json
