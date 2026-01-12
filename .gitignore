@@ -38,4 +38,6 @@ runtime/NapCatQQ/tmp/
 **/*secret*.json
 **/*_local.json
 
-#bot_settings.json
+bot_settings.json
+
+**/pic/

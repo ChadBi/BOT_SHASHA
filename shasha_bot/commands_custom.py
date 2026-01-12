@@ -57,15 +57,15 @@ async def _daily_img(ctx):
     filename = f"{hsh}"
     # print(json.dumps(test, ensure_ascii=False, indent=2))
     await ctx.send_text(f"[CQ:image,url={url}]", quote=False)
-    if os.path.exists(f"BOT/shasha_bot/pic/{filename}.txt"):
+    if os.path.exists(f"shasha_bot/pic/{filename}.txt"):
         print("文件已存在，跳过下载")
-        with open(f"BOT/shasha_bot/pic/{filename}.txt", "r", encoding="utf-8") as f:
+        with open(f"shasha_bot/pic/{filename}.txt", "r", encoding="utf-8") as f:
             respond = f.read()
         sleep(1)
         await ctx.send_text(respond, quote=False)
     else:
         respond = await ctx.services.vision.ask(url, prompt="你是专业的影像摄影师，请详细介绍这张必应每日壁纸的拍摄亮点和美学价值，以及相关的摄影技巧。\n请控制在200字以内。不要使用markdown格式。一两段话就说完")
-        with open(f"BOT/shasha_bot/pic/{filename}.txt", "w", encoding="utf-8") as f:
+        with open(f"shasha_bot/pic/{filename}.txt", "w", encoding="utf-8") as f:
             f.write(respond)
         await ctx.send_text(respond, quote=False)
 
