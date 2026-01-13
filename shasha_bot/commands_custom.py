@@ -1,73 +1,213 @@
-"""你以后新增功能，主要改这个文件就行。
+from __future__ import annotations
 
-思路：添加一个 Command 到 CUSTOM_COMMANDS 列表。
+import asyncio
+import json
+from pathlib import Path
+from typing import List, Optional
 
-例 1：提到关键词就回复
+import httpx
 
-from .router import keyword_contains
+from .router import Command, exact_match, prefix
+from .memory import MemoryManager, format_memory_summary
 
-async def _ping(ctx):
-    await ctx.send_text("pong", quote=True)
+BING_JSON_URL = "https://raw.onmicrosoft.cn/Bing-Wallpaper-Action/main/data/zh-CN_update.json"
+BING_HOST = "https://www.bing.com"
+CACHE_DIR = Path("shasha_bot/pic")
 
-CUSTOM_COMMANDS = [
-    keyword_contains("ping", "ping", _ping, require_mentioned=True),
-]
 
-例 2：前缀命令（比如：搜=xxx）
+def get_memory_manager(ctx) -> Optional[MemoryManager]:
+    """从 context 中获取记忆管理器。"""
+    if ctx.services and ctx.services.memory:
+        return ctx.services.memory
+    return None
 
-from .router import prefix
+VISION_PROMPT = (
+    "你是专业的影像摄影师，请详细介绍这张必应每日壁纸的拍摄亮点和美学价值，以及相关的摄影技巧。\n"
+    "请控制在200字以内。不要使用markdown格式。一两段话就说完"
+)
 
-async def _echo(ctx):
-    await ctx.send_text(f"你说的是：{ctx.text}", quote=True)
+MENU_TEXT = """🤖 菜单
 
-CUSTOM_COMMANDS = [
-    prefix("echo", "echo=", _echo, require_mentioned=True),
-]
+【常用】
+1、每日一图
+2、正常聊天（@我 + 文字）
 
-说明：
-- require_mentioned=True 表示必须 @ 机器人时才触发，避免群里误触。
-- 如果你想“无论是否 @ 都触发”，把 require_mentioned=False。
+【图片】
+1、图片编辑（@我 回复图片 + 编辑=需求）
+2、图片评论（@我 发送或回复图片 + 文字）
+
+【记忆】（需要@我）
+1、昵称=xxx（设置你的昵称）
+2、自述=xxx（告诉我关于你的信息）
+3、查看记忆（查看我记住的信息）
+4、清除自述（清除你的自述）
+5、清除记忆（清除短期记忆和自述）
 """
 
-from __future__ import annotations
-import json
-import os
-from time import sleep
-import httpx
-from typing import List
-import http.client
-from .router import Command,exact_match
-from .ai.zhipu_vision import ZhipuVision
+
+async def _fetch_bing_today() -> tuple[str, str]:
+    """返回 (image_url, hsh)"""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(BING_JSON_URL)
+        resp.raise_for_status()
+        data = resp.json()
+
+    img = data["images"][0]
+    url = f"{BING_HOST}{img['url']}"
+    hsh = img["hsh"]
+    return url, hsh
+
+
+def _cache_path(hsh: str) -> Path:
+    return CACHE_DIR / f"{hsh}.txt"
+
+
+def _read_cache(hsh: str) -> Optional[str]:
+    p = _cache_path(hsh)
+    if not p.exists():
+        return None
+    return p.read_text(encoding="utf-8")
+
+
+def _write_cache(hsh: str, text: str) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _cache_path(hsh).write_text(text, encoding="utf-8")
+
+
 async def _daily_img(ctx):
-    conn = http.client.HTTPSConnection("raw.onmicrosoft.cn")
-    payload = ''
-    headers = {}
-    # 1) 获取 JSON
-    conn.request("GET", "/Bing-Wallpaper-Action/main/data/zh-CN_update.json", payload, headers)
-    res = conn.getresponse()
-    data = res.read()
-    data = json.loads(data.decode("utf-8"))
-    # 2) 取第一张图
-    test = data["images"][0]
-    path = test["url"]
-    host = "https://www.bing.com"
-    # 3) 拼接完整下载链接
-    url = f"{host}{path}"
-    hsh = test["hsh"]
-    filename = f"{hsh}"
-    # print(json.dumps(test, ensure_ascii=False, indent=2))
+    url, hsh = await _fetch_bing_today()
+
+    # 先发图
     await ctx.send_text(f"[CQ:image,url={url}]", quote=False)
-    if os.path.exists(f"shasha_bot/pic/{filename}.txt"):
-        print("文件已存在，跳过下载")
-        with open(f"shasha_bot/pic/{filename}.txt", "r", encoding="utf-8") as f:
-            respond = f.read()
-        sleep(1)
-        await ctx.send_text(respond, quote=False)
-    else:
-        respond = await ctx.services.vision.ask(url, prompt="你是专业的影像摄影师，请详细介绍这张必应每日壁纸的拍摄亮点和美学价值，以及相关的摄影技巧。\n请控制在200字以内。不要使用markdown格式。一两段话就说完")
-        with open(f"shasha_bot/pic/{filename}.txt", "w", encoding="utf-8") as f:
-            f.write(respond)
-        await ctx.send_text(respond, quote=False)
 
-CUSTOM_COMMANDS: List[Command] = [exact_match("daily_img", "每日一图", _daily_img, require_mentioned=False)]
+    # 读缓存
+    cached = _read_cache(hsh)
+    if cached:
+        await asyncio.sleep(1)
+        await ctx.send_text(cached, quote=False)
+        return
 
+    # 调 vision 并缓存
+    text = await ctx.services.vision.ask(url, prompt=VISION_PROMPT)
+    _write_cache(hsh, text)
+    await ctx.send_text(text, quote=False)
+
+
+async def _menu(ctx):
+    await ctx.send_text(MENU_TEXT, quote=False)
+
+
+# ================== 记忆相关命令 ==================
+
+async def _set_nickname(ctx):
+    """设置昵称命令：昵称=xxx"""
+    text = ctx.text or ""
+    if not text.startswith("昵称="):
+        return
+    nickname = text[3:].strip()
+    if not nickname:
+        await ctx.send_text("昵称不能为空哦~", quote=True)
+        return
+    if len(nickname) > 20:
+        await ctx.send_text("昵称太长啦，最多20个字~", quote=True)
+        return
+
+    manager = get_memory_manager(ctx)
+    if not manager:
+        await ctx.send_text("记忆功能未启用~", quote=True)
+        return
+
+    user_id = str(ctx.user_id)
+    await manager.set_nickname(user_id, nickname)
+    await ctx.send_text(f"好的，以后就叫你「{nickname}」啦~ ✧", quote=True)
+
+
+async def _add_self_desc(ctx):
+    """添加自述命令：自述=xxx"""
+    text = ctx.text or ""
+    if not text.startswith("自述="):
+        return
+    desc = text[3:].strip()
+    if not desc:
+        await ctx.send_text("自述内容不能为空哦~", quote=True)
+        return
+    if len(desc) > 200:
+        await ctx.send_text("自述太长啦，最多200个字~", quote=True)
+        return
+
+    manager = get_memory_manager(ctx)
+    if not manager:
+        await ctx.send_text("记忆功能未启用~", quote=True)
+        return
+
+    user_id = str(ctx.user_id)
+    await manager.add_self_description(user_id, desc)
+    await ctx.send_text("已记住你的介绍啦~ (≧▽≦)/", quote=True)
+
+
+async def _view_memory(ctx):
+    """查看记忆命令"""
+    manager = get_memory_manager(ctx)
+    if not manager:
+        await ctx.send_text("记忆功能未启用~", quote=True)
+        return
+
+    user_id = str(ctx.user_id)
+    summary = await manager.get_user_summary(user_id)
+    text = format_memory_summary(summary)
+    await ctx.send_text(text, quote=True)
+
+
+async def _clear_self_desc(ctx):
+    """清除自述命令"""
+    manager = get_memory_manager(ctx)
+    if not manager:
+        await ctx.send_text("记忆功能未启用~", quote=True)
+        return
+
+    user_id = str(ctx.user_id)
+    await manager.clear_self_descriptions(user_id)
+    await ctx.send_text("已清除你的所有自述~ ", quote=True)
+
+
+async def _clear_memory(ctx):
+    """清除记忆命令（清除短期记忆和自述）"""
+    manager = get_memory_manager(ctx)
+    if not manager:
+        await ctx.send_text("记忆功能未启用~", quote=True)
+        return
+
+    user_id = str(ctx.user_id)
+    await manager.clear_stm(user_id)
+    await manager.clear_self_descriptions(user_id)
+    await ctx.send_text("已清除我对你的短期记忆和自述~", quote=True)
+
+
+async def _view_bot_emotion(ctx):
+    """查看机器人当前情感状态（VAD）。"""
+    manager = get_memory_manager(ctx)
+    if not manager:
+        await ctx.send_text("记忆功能未启用，当前没有情感状态可查看~", quote=True)
+        return
+
+    state = manager.get_bot_emotion()
+    await ctx.send_text(
+        f"我现在的状态：{state.get_suggested_tone()} | V={state.V:.2f} A={state.A:.2f} D={state.D:.2f}",
+        quote=True,
+    )
+
+
+
+
+
+CUSTOM_COMMANDS: List[Command] = [
+    exact_match("daily_img", "每日一图", _daily_img, require_mentioned=False),
+    exact_match("menu", "菜单", _menu, require_mentioned=False),
+    # 记忆相关命令（需要 @）
+    prefix("set_nickname", "昵称=", _set_nickname, require_mentioned=True),
+    prefix("add_self_desc", "自述=", _add_self_desc, require_mentioned=True),
+    exact_match("view_memory", "查看记忆", _view_memory, require_mentioned=True),
+    exact_match("view_bot_emotion", "查看情感", _view_bot_emotion, require_mentioned=True),
+    exact_match("clear_self_desc", "清除自述", _clear_self_desc, require_mentioned=True),
+    exact_match("clear_memory", "清除记忆", _clear_memory, require_mentioned=True),
+]

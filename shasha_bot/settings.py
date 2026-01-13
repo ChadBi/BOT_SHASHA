@@ -35,10 +35,20 @@ class BotSettings:
 
     aliyun_api_key: str = ""
 
+    siliconflow_api_key: str = ""  # SiliconFlow 情绪识别
+
     # Behavior（行为参数）
     random_reply_chance: int = 200
     max_text_tokens: int = 50
     temperature: float = 1.3
+
+    # Memory（记忆模块配置）
+    stm_max_turns: int = 20  # 短期记忆最大轮数
+    personality_update_min_msgs: int = 50  # 触发人格总结的最小消息数
+    personality_update_cooldown_hours: float = 24.0  # 人格总结冷却时间（小时）
+    emotion_decay_alpha: float = 0.7  # 情绪衰减系数（0~1）
+    max_self_descriptions: int = 10  # 最大自述条数
+    enable_memory: bool = True  # 是否启用记忆模块
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -85,6 +95,39 @@ def load_settings(config_path: Optional[str] = None) -> BotSettings:
     except Exception:
         temperature = 1.3
 
+    # 记忆模块配置
+    stm_max_turns_raw = pick("stm_max_turns", 20)
+    try:
+        stm_max_turns = int(stm_max_turns_raw)
+    except Exception:
+        stm_max_turns = 20
+
+    personality_update_min_msgs_raw = pick("personality_update_min_msgs", 50)
+    try:
+        personality_update_min_msgs = int(personality_update_min_msgs_raw)
+    except Exception:
+        personality_update_min_msgs = 50
+
+    personality_update_cooldown_hours_raw = pick("personality_update_cooldown_hours", 24.0)
+    try:
+        personality_update_cooldown_hours = float(personality_update_cooldown_hours_raw)
+    except Exception:
+        personality_update_cooldown_hours = 24.0
+
+    emotion_decay_alpha_raw = pick("emotion_decay_alpha", 0.7)
+    try:
+        emotion_decay_alpha = float(emotion_decay_alpha_raw)
+    except Exception:
+        emotion_decay_alpha = 0.7
+
+    max_self_descriptions_raw = pick("max_self_descriptions", 10)
+    try:
+        max_self_descriptions = int(max_self_descriptions_raw)
+    except Exception:
+        max_self_descriptions = 10
+
+    enable_memory = bool(pick("enable_memory", True))
+
     return BotSettings(
         host=host,
         port=port,
@@ -94,7 +137,14 @@ def load_settings(config_path: Optional[str] = None) -> BotSettings:
         deepseek_base_url=str(pick("deepseek_base_url", "https://api.deepseek.com")),
         zhipu_api_key=str(pick("zhipu_api_key", "")),
         aliyun_api_key=str(pick("aliyun_api_key", "")),
+        siliconflow_api_key=str(pick("siliconflow_api_key", "")),
         random_reply_chance=random_reply_chance,
         max_text_tokens=max_text_tokens,
         temperature=temperature,
+        stm_max_turns=stm_max_turns,
+        personality_update_min_msgs=personality_update_min_msgs,
+        personality_update_cooldown_hours=personality_update_cooldown_hours,
+        emotion_decay_alpha=emotion_decay_alpha,
+        max_self_descriptions=max_self_descriptions,
+        enable_memory=enable_memory,
     )

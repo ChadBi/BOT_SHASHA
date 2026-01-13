@@ -12,12 +12,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Protocol
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Protocol
 
 from .cq import extract_image_url, extract_reply_id, contains_at, normalize_user_text
+from .memory.prompt import build_system_context, build_chat_messages
+
+logger = logging.getLogger(__name__)
 from .settings import BotSettings
 
 
@@ -39,10 +43,12 @@ class Services:
 - deepseek.ask(text) -> str
 - vision.ask(image_url) -> str
 - image_edit.edit(image_url, prompt) -> str
+- memory: MemoryManager (可选)
     """
     deepseek: Any
     vision: Any
     image_edit: Any
+    memory: Any = None  # MemoryManager，可选
 
 
 def _send_msg_payload(
@@ -263,6 +269,7 @@ async def dispatch(commands: Iterable[Command], ctx: BotContext) -> bool:
 # --------- 一些内置“通用命令”实现（后面在 commands.py 里组装顺序） ---------
 
 async def run_reply_callback(ctx: BotContext) -> None:
+    """处理回复消息的回调（集成记忆模块）。"""
     echo_id = ctx.event.get("echo")
     saved = ctx.pending_requests.pop(echo_id, None)
     if not saved:
@@ -271,12 +278,13 @@ async def run_reply_callback(ctx: BotContext) -> None:
     print(f"🔄 收到 get_msg 响应: {echo_id}")
     msg_data = ctx.event.get("data", {})
     target_msg = msg_data.get("raw_message") or str(msg_data.get("message", ""))
+    user_id = str(saved.user_id) if saved.user_id else None
 
     target_img_url = extract_image_url(target_msg)
+    user_msg_clean = normalize_user_text(saved.raw_msg)
 
     if target_img_url:
         print("🕵️ 在被回复的消息中找到了图片！")
-        user_msg_clean = normalize_user_text(saved.raw_msg)
 
         if user_msg_clean.startswith("编辑="):
             edit_prompt = user_msg_clean[3:].strip()
@@ -286,20 +294,58 @@ async def run_reply_callback(ctx: BotContext) -> None:
                 reply_text = await ctx.services.image_edit.edit(target_img_url, edit_prompt)
         else:
             reply_text = await ctx.services.vision.ask(target_img_url)
+    else:
+        print("⚠️ 被回复的消息里没有图片，转为普通文本回复...")
+        user_question = user_msg_clean or "（盯着你回复的消息看）"
+        full_prompt = f"我回复了消息：'{target_msg}'。\n我的评论是：{user_question}"
+        reply_text = await ctx.services.deepseek.ask(full_prompt)
 
-        payload = _send_msg_payload(
-            user_id=saved.user_id,
-            group_id=saved.group_id,
-            message_type=saved.message_type,
-            message=f"[CQ:reply,id={saved.message_id}] {reply_text}",
-        )
-        await ctx.send_payload(payload)
-        return
+    # 记录到 STM（如果有记忆模块）
+    if ctx.services.memory and user_id:
+        try:
+            memory = ctx.services.memory
+            trigger_type = "reply_with_image" if target_img_url else "reply_text"
 
-    print("⚠️ 被回复的消息里没有图片，转为普通文本回复...")
-    user_question = normalize_user_text(saved.raw_msg) or "（盯着你回复的消息看）"
-    full_prompt = f"我回复了消息：“{target_msg}”。\n我的评论是：{user_question}"
-    reply_text = await ctx.services.deepseek.ask(full_prompt)
+            # 识别用户情绪（用用户本次回复文本；为空则用兜底短句）
+            try:
+                emotion_text = user_msg_clean or "（回复了一条消息）"
+                user_emotion = await memory.emotion_recognizer.recognize_async(emotion_text)
+            except Exception as emo_err:
+                print(f"[emotion] 回复场景情绪识别失败: {emo_err}")
+                user_emotion = None
+            
+            # 记录用户回复行为
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="user",
+                text=f"[回复消息] {user_msg_clean}" if user_msg_clean else f"[回复消息: {target_msg[:30]}...]",
+                meta={
+                    "trigger": trigger_type,
+                    "has_image": bool(target_img_url),
+                    "emotion": getattr(user_emotion, "label", None),
+                },
+            )
+            
+            # 记录机器人回复
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="assistant",
+                text=reply_text,
+                meta={"trigger": trigger_type},
+            )
+            
+            await memory.update_relation_on_interaction(user_id)
+
+            # 更新并打印机器人情绪
+            if user_emotion is not None:
+                bot_state = await memory.update_bot_emotion(user_emotion, user_id)
+                print(
+                    f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
+                    f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
+                )
+            print(f"[chat] {trigger_type} user={user_id} reply_len={len(reply_text)}")
+        except Exception as e:
+            print(f"[chat] 回复场景记忆写入失败: {e}")
 
     payload = _send_msg_payload(
         user_id=saved.user_id,
@@ -309,9 +355,59 @@ async def run_reply_callback(ctx: BotContext) -> None:
     )
     await ctx.send_payload(payload)
 
-
 async def run_mentioned_with_image(ctx: BotContext) -> None:
+    """处理 @机器人 + 图片（集成记忆模块）。"""
+    user_id = str(ctx.user_id) if ctx.user_id else None
+    img_description = ctx.text or "看看这张图"
+    
+    # 调用视觉模型
     reply_text = await ctx.services.vision.ask(ctx.img_url or "")
+    
+    # 记录到 STM（如果有记忆模块）
+    if ctx.services.memory and user_id:
+        try:
+            memory = ctx.services.memory
+
+            # 识别用户情绪（用用户随图附带的文字/描述）
+            try:
+                user_emotion = await memory.emotion_recognizer.recognize_async(img_description)
+            except Exception as emo_err:
+                print(f"[emotion] 图片场景情绪识别失败: {emo_err}")
+                user_emotion = None
+            
+            # 记录用户发图行为
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="user",
+                text=f"[发送图片] {img_description}",
+                meta={
+                    "trigger": "mentioned_with_image",
+                    "has_image": True,
+                    "emotion": getattr(user_emotion, "label", None),
+                },
+            )
+            
+            # 记录机器人回复
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="assistant",
+                text=reply_text,
+                meta={"trigger": "mentioned_with_image"},
+            )
+            
+            await memory.update_relation_on_interaction(user_id)
+
+            # 更新并打印机器人情绪
+            if user_emotion is not None:
+                bot_state = await memory.update_bot_emotion(user_emotion, user_id)
+                print(
+                    f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
+                    f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
+                )
+            print(f"[chat] mentioned_with_image user={user_id} reply_len={len(reply_text)}")
+        except Exception as e:
+            print(f"[chat] 图片场景记忆写入失败: {e}")
+    
     await ctx.send_text(reply_text, quote=True)
 
 
@@ -334,15 +430,180 @@ async def run_mentioned_with_reply(ctx: BotContext) -> None:
 
 
 async def run_mentioned_text(ctx: BotContext) -> None:
+    """处理 @机器人 的纯文本消息（集成记忆模块）。"""
     question = ctx.text or "你叫我干嘛？"
-    reply_text = await ctx.services.deepseek.ask(question)
+    user_id = str(ctx.user_id) if ctx.user_id else None
+
+    # 如果有记忆模块，使用增强对话
+    if ctx.services.memory and user_id:
+        try:
+            memory = ctx.services.memory
+
+            # 0) 识别用户情绪（优先 LLM，失败自动降级）
+            user_emotion = await memory.emotion_recognizer.recognize_async(question)
+
+            # 1) 记录“用户本轮输入”到 STM（仅自然语言对话才写入）
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="user",
+                text=question,
+                meta={
+                    "message_type": ctx.message_type,
+                    "group_id": ctx.group_id,
+                    "trigger": "mentioned_text",
+                    "emotion": user_emotion.label,
+                },
+            )
+
+            # 2. 获取用户状态和关系
+            user_state = await memory.get_user_state(user_id)
+            relation = await memory.get_relation(user_id)
+            bot_emotion = memory.get_bot_emotion()
+
+            # 3. 构建系统上下文
+            system_prompt = build_system_context(
+                user_state=user_state,
+                relation=relation,
+                user_emotion=user_emotion,
+                bot_vad=bot_emotion,
+                base_system_prompt=ctx.settings.system_prompt,
+            )
+
+            # 4. 获取历史对话并构造多轮 messages
+            stm = memory.get_stm(user_id)
+            messages = build_chat_messages(
+                stm=stm,
+                current_question=question,
+                system_prompt=system_prompt,
+                max_history=10,
+            )
+
+            # 5. 调用 LLM（多轮）
+            reply_text = await ctx.services.deepseek.ask_with_messages(messages)
+
+            # 6. 记录机器人回复到 STM
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="assistant",
+                text=reply_text,
+                meta={"emotion": user_emotion.label},
+            )
+
+            # 7. 更新关系和情绪
+            await memory.update_relation_on_interaction(user_id)
+            bot_state = await memory.update_bot_emotion(user_emotion, user_id)
+            print(
+                f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
+                f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
+            )
+
+            if user_emotion.label in ("angry", "disgust") and user_emotion.intensity > 0.6:
+                await memory.update_relation_on_negative_emotion(user_id, user_emotion.intensity)
+
+            # 8. 异步任务：LTM提取和人格分析（不阻塞回复）
+            try:
+                await memory.extract_ltm_from_stm(user_id)
+                await memory.maybe_update_personality(user_id, ctx.services.deepseek)
+            except Exception as bg_err:
+                print(f"[chat] 后台任务失败: {bg_err}")
+
+            print(f"[chat] mentioned_text user={user_id} emo={user_emotion.label} reply_len={len(reply_text)}")
+
+        except Exception as e:
+            print(f"[chat] 记忆模块对话失败，降级到普通模式: {e}")
+            reply_text = await ctx.services.deepseek.ask(question)
+    else:
+        # 无记忆模块，使用普通模式
+        reply_text = await ctx.services.deepseek.ask(question)
+
     await ctx.send_text(reply_text, quote=False)
 
 
 async def run_random_chitchat(ctx: BotContext) -> None:
+    """随机触发闲聊（集成记忆模块）。"""
     chance = max(1, ctx.settings.random_reply_chance)
     if random.randint(1, chance) != 1:
         return
+    
     print("🤖 随机触发闲聊...")
-    reply_text = await ctx.services.deepseek.ask(ctx.raw_msg)
+    user_id = str(ctx.user_id) if ctx.user_id else None
+    question = ctx.raw_msg
+
+    # 如果有记忆模块，使用增强对话
+    if ctx.services.memory and user_id:
+        try:
+            memory = ctx.services.memory
+
+            # 0) 识别用户情绪（优先 LLM，失败自动降级）
+            user_emotion = await memory.emotion_recognizer.recognize_async(question)
+
+            # 1) 只有触发了闲聊回复，才把用户输入写入 STM
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="user",
+                text=question,
+                meta={
+                    "message_type": ctx.message_type,
+                    "group_id": ctx.group_id,
+                    "trigger": "random_chitchat",
+                    "emotion": user_emotion.label,
+                },
+            )
+
+            # 2. 获取用户状态和关系
+            user_state = await memory.get_user_state(user_id)
+            relation = await memory.get_relation(user_id)
+            bot_emotion = memory.get_bot_emotion()
+
+            # 3. 构建系统上下文
+            system_prompt = build_system_context(
+                user_state=user_state,
+                relation=relation,
+                user_emotion=user_emotion,
+                bot_vad=bot_emotion,
+                base_system_prompt=ctx.settings.system_prompt,
+            )
+
+            # 4. 获取历史对话（随机闲聊用更少的历史）
+            stm = memory.get_stm(user_id)
+            messages = build_chat_messages(
+                stm=stm,
+                current_question=question,
+                system_prompt=system_prompt,
+                max_history=6,
+            )
+
+            # 5. 调用 LLM（多轮）
+            reply_text = await ctx.services.deepseek.ask_with_messages(messages)
+
+            # 6. 记录机器人回复到 STM
+            await memory.append_to_stm(
+                user_id=user_id,
+                role="assistant",
+                text=reply_text,
+                meta={"trigger": "random_chitchat"},
+            )
+
+            # 7. 更新关系
+            await memory.update_relation_on_interaction(user_id)
+
+            # 8. 更新并打印机器人情绪
+            bot_state = await memory.update_bot_emotion(user_emotion, user_id)
+            print(
+                f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
+                f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
+            )
+
+            if user_emotion.label in ("angry", "disgust") and user_emotion.intensity > 0.6:
+                await memory.update_relation_on_negative_emotion(user_id, user_emotion.intensity)
+
+            print(f"[chat] random_chitchat user={user_id} emo={user_emotion.label} reply_len={len(reply_text)}")
+
+        except Exception as e:
+            print(f"[chat] 记忆模块闲聊失败，降级到普通模式: {e}")
+            reply_text = await ctx.services.deepseek.ask(question)
+    else:
+        # 无记忆模块，使用普通模式
+        reply_text = await ctx.services.deepseek.ask(question)
+
     await ctx.send_text(reply_text, quote=False)
