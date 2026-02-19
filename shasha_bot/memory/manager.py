@@ -26,27 +26,11 @@ from .emotion import EmotionRecognizer, update_bot_vad
 
 logger = logging.getLogger(__name__)
 
+# 导入 MemorySettings 作为 MemoryConfig 的别名（向后兼容）
+from ..settings import MemorySettings
 
-class MemoryConfig:
-    """记忆模块配置。"""
-    # 短期记忆最大轮数
-    STM_MAX_TURNS: int = 20
-
-    # 人格总结触发阈值
-    PERSONALITY_UPDATE_MIN_MSGS: int = 50
-
-    # 人格总结冷却时间（小时）
-    PERSONALITY_UPDATE_COOLDOWN_HOURS: float = 24.0
-
-    # 情绪衰减系数（0~1，越大惯性越强）
-    EMOTION_DECAY_ALPHA: float = 0.7
-
-    # 自述最大条数
-    MAX_SELF_DESCRIPTIONS: int = 10
-
-    # 关系更新步长
-    FAMILIARITY_STEP: float = 0.01
-    TRUST_STEP: float = 0.005
+# 向后兼容：旧代码可能使用 MemoryConfig
+MemoryConfig = MemorySettings
 
 
 class MemoryManager:
@@ -57,23 +41,43 @@ class MemoryManager:
     - 管理用户关系（RelationState）
     - 管理机器人情绪（BotEmotionState）
     - 提供情绪识别（EmotionRecognizer）
+
+    配置通过 MemorySettings 传入（来自 BotSettings.memory）。
     """
 
     def __init__(
         self,
         data_dir: Optional[Path] = None,
-        config: Optional[MemoryConfig] = None,
+        config: Optional["MemorySettings"] = None,  # forward reference
     ):
+        """初始化记忆管理器。
+
+        参数:
+            data_dir: 数据存储目录
+            config: MemorySettings 配置（来自 BotSettings.memory）
+        """
         if data_dir is None:
             data_dir = Path("shasha_bot/memory_data")
         self.storage = Storage(data_dir)
-        self.config = config or MemoryConfig()
-        self.emotion_recognizer = EmotionRecognizer()
+        self.config = config
+        self._emotion_recognizer: Optional[EmotionRecognizer] = None
 
         # 内存缓存（减少磁盘 I/O）
         self._user_cache: Dict[str, UserMemoryState] = {}
         self._relation_cache: Dict[str, RelationState] = {}
         self._bot_emotion: BotEmotionState = BotEmotionState()
+
+    @property
+    def emotion_recognizer(self) -> EmotionRecognizer:
+        """获取情绪识别器（懒加载）。"""
+        if self._emotion_recognizer is None:
+            self._emotion_recognizer = EmotionRecognizer()
+        return self._emotion_recognizer
+
+    @emotion_recognizer.setter
+    def emotion_recognizer(self, value: EmotionRecognizer) -> None:
+        """设置情绪识别器（支持注入带 LLM 的版本）。"""
+        self._emotion_recognizer = value
 
     async def get_user_state(self, user_id: str) -> UserMemoryState:
         """获取用户记忆状态（带缓存）。"""
@@ -153,7 +157,7 @@ class MemoryManager:
         state.short_term_memory.append(msg)
 
         # 保持最大轮数
-        while len(state.short_term_memory) > self.config.STM_MAX_TURNS:
+        while len(state.short_term_memory) > self.config.stm_max_turns:
             state.short_term_memory.pop(0)
 
         # 更新计数器
@@ -184,7 +188,7 @@ class MemoryManager:
         state = await self.get_user_state(user_id)
 
         # 检查数量限制
-        if len(state.profile.self_descriptions) >= self.config.MAX_SELF_DESCRIPTIONS:
+        if len(state.profile.self_descriptions) >= self.config.max_self_descriptions:
             # 移除最早的一条
             state.profile.self_descriptions.pop(0)
 
@@ -215,7 +219,7 @@ class MemoryManager:
 
         # 增加熟悉度
         relation.familiarity = min(
-            1.0, relation.familiarity + self.config.FAMILIARITY_STEP
+            1.0, relation.familiarity + self.config.familiarity_step
         )
         relation.last_interaction_ts = time.time()
 
@@ -230,7 +234,7 @@ class MemoryManager:
         # 只有高强度负面情绪才影响
         if intensity > 0.6:
             relation.trust = max(
-                0.1, relation.trust - self.config.TRUST_STEP * intensity
+                0.1, relation.trust - self.config.trust_step * intensity
             )
             await self.save_relation(user_id)
 
@@ -252,7 +256,7 @@ class MemoryManager:
             prev_vad=self._bot_emotion,
             user_emotion=user_emotion,
             relation=relation,
-            decay_alpha=self.config.EMOTION_DECAY_ALPHA,
+            decay_alpha=self.config.emotion_decay_alpha,
         )
         self._bot_emotion = new_state
         return new_state
@@ -264,12 +268,12 @@ class MemoryManager:
         state = await self.get_user_state(user_id)
         counters = state.counters
 
-        # 条件1：新消息数达到阈值
-        if counters.new_msgs_since_last_summary < self.config.PERSONALITY_UPDATE_MIN_MSGS:
+        # 条件 1：新消息数达到阈值
+        if counters.new_msgs_since_last_summary < self.config.personality_update_min_msgs:
             return False
 
-        # 条件2：冷却时间已过
-        cooldown_seconds = self.config.PERSONALITY_UPDATE_COOLDOWN_HOURS * 3600
+        # 条件 2：冷却时间已过
+        cooldown_seconds = self.config.personality_update_cooldown_hours * 3600
         if time.time() - counters.last_summary_ts < cooldown_seconds:
             return False
 
@@ -301,7 +305,7 @@ class MemoryManager:
         return {
             "user_id": user_id,
             "nickname": state.profile.nickname,
-            "self_descriptions": state.profile.self_descriptions[-3:],  # 最近3条
+            "self_descriptions": state.profile.self_descriptions[-3:],  # 最近 3 条
             "personality": state.personality.to_dict(),
             "stm_length": len(state.short_term_memory),
             "total_msgs": state.counters.total_msgs,
@@ -317,84 +321,84 @@ class MemoryManager:
     def build_personality_analysis_prompt(self, stm: list) -> str:
         """构建人格分析的 prompt。"""
         # 提取用户消息
-        user_messages = [m.text for m in stm if m.role == "user"][-20:]  # 最近20条
+        user_messages = [m.text for m in stm if m.role == "user"][-20:]  # 最近 20 条
         if not user_messages:
             return ""
-        
+
         conversation_text = "\n".join([f"- {msg}" for msg in user_messages])
-        
+
         return f"""请分析以下用户消息，推断其人格特征。
 
 用户消息：
 {conversation_text}
 
-请用JSON格式返回人格因子（0.0-1.0范围）：
+请用 JSON 格式返回人格因子（0.0-1.0 范围）：
 - talkative: 话多程度（消息长度、频率）
 - optimism: 乐观程度（正面词汇、积极态度）
 - stability: 情绪稳定性（情绪波动、激动程度）
 - politeness: 礼貌程度（敬语、友好表达）
 
-只返回JSON，格式如：{{"talkative": 0.6, "optimism": 0.7, "stability": 0.5, "politeness": 0.8}}"""
+只返回 JSON，格式如：{{"talkative": 0.6, "optimism": 0.7, "stability": 0.5, "politeness": 0.8}}"""
 
     async def analyze_personality_with_llm(
         self, user_id: str, llm_client
     ) -> Optional[PersonalityFactors]:
         """使用 LLM 分析用户人格因子。
-        
+
         参数:
-            user_id: 用户ID
+            user_id: 用户 ID
             llm_client: DeepSeek 客户端
-            
+
         返回:
             PersonalityFactors 或 None（分析失败时）
         """
         import json as json_module
-        
+
         state = await self.get_user_state(user_id)
         stm = state.short_term_memory
-        
+
         if len(stm) < 10:
             logger.debug("用户 %s 消息不足，跳过人格分析", user_id)
             return None
-        
+
         prompt = self.build_personality_analysis_prompt(stm)
         if not prompt:
             return None
-        
+
         try:
             response = await llm_client.ask(prompt)
-            
+
             # 解析 JSON
             response = response.strip()
             if response.startswith("```"):
                 lines = response.split("\n")
                 response = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-            
+
             data = json_module.loads(response)
-            
+
             factors = PersonalityFactors(
                 talkative=max(0.0, min(1.0, float(data.get("talkative", 0.5)))),
                 optimism=max(0.0, min(1.0, float(data.get("optimism", 0.5)))),
                 stability=max(0.0, min(1.0, float(data.get("stability", 0.5)))),
                 politeness=max(0.0, min(1.0, float(data.get("politeness", 0.5)))),
             )
-            
+
             logger.info("用户 %s 人格分析完成", user_id)
             return factors
-            
+
         except Exception as e:
-            logger.warning("用户 %s 人格分析失败: %s", user_id, e)
+            logger.warning("用户 %s 人格分析失败：%s", user_id, e)
             return None
 
     async def maybe_update_personality(self, user_id: str, llm_client) -> bool:
         """检查并可能更新用户人格因子。
-        
+
         返回:
             是否执行了更新
         """
         if not await self.should_update_personality(user_id):
             return False
-        
+
         factors = await self.analyze_personality_with_llm(user_id, llm_client)
         if factors:
             await self.update_personality(user_id, factors)
@@ -405,34 +409,34 @@ class MemoryManager:
 
     async def extract_ltm_from_stm(self, user_id: str, llm_client=None) -> list:
         """从 STM 中提取重要事件到 LTM。
-        
+
         参数:
-            user_id: 用户ID
+            user_id: 用户 ID
             llm_client: 可选的 LLM 客户端（用于智能提取）
-            
+
         返回:
             提取的 LTM 条目列表
         """
         state = await self.get_user_state(user_id)
         stm = state.short_term_memory
-        
+
         if len(stm) < 5:
             return []
-        
+
         # 初始化 LTM 列表（如果不存在）
         if not hasattr(state, 'long_term_memory') or state.long_term_memory is None:
             state.long_term_memory = []
-        
+
         extracted = []
-        
+
         # 规则提取：查找重要模式
         for msg in stm:
             if msg.role != "user":
                 continue
-            
+
             text = msg.text
             importance = self._calculate_message_importance(text, msg.meta)
-            
+
             if importance >= 0.7:
                 ltm_entry = {
                     "type": "event",
@@ -441,35 +445,35 @@ class MemoryManager:
                     "importance": importance,
                     "meta": msg.meta,
                 }
-                
+
                 # 去重检查
                 if not self._is_duplicate_ltm(state.long_term_memory, ltm_entry):
                     state.long_term_memory.append(ltm_entry)
                     extracted.append(ltm_entry)
-        
+
         # 保持 LTM 大小限制
         max_ltm = 50
         if len(state.long_term_memory) > max_ltm:
             # 按重要性和时间排序，保留最重要的
             state.long_term_memory.sort(key=lambda x: (x.get("importance", 0), x.get("ts", 0)), reverse=True)
             state.long_term_memory = state.long_term_memory[:max_ltm]
-        
+
         if extracted:
             await self.save_user_state(user_id)
-            logger.info("用户 %s 提取长期记忆: %s 条", user_id, len(extracted))
-        
+            logger.info("用户 %s 提取长期记忆：%s 条", user_id, len(extracted))
+
         return extracted
 
     def _calculate_message_importance(self, text: str, meta: dict) -> float:
         """计算消息的重要性分数（0-1）。"""
         importance = 0.3  # 基础分
-        
+
         # 长度因素
         if len(text) > 50:
             importance += 0.1
         if len(text) > 100:
             importance += 0.1
-        
+
         # 关键词检测
         important_keywords = [
             "生日", "名字", "叫我", "住在", "工作", "学校", "喜欢", "讨厌",
@@ -479,16 +483,16 @@ class MemoryManager:
         for kw in important_keywords:
             if kw in text:
                 importance += 0.1
-        
+
         # 情绪强度
         emotion = meta.get("emotion", "neutral")
         if emotion in ("happy", "sad", "angry") and meta.get("intensity", 0) > 0.7:
             importance += 0.15
-        
+
         # 自述相关
         if "trigger" in meta and meta["trigger"] in ("mentioned_text", "random_chitchat"):
             importance += 0.05
-        
+
         return min(1.0, importance)
 
     def _is_duplicate_ltm(self, ltm_list: list, new_entry: dict) -> bool:
@@ -508,4 +512,3 @@ class MemoryManager:
         if hasattr(state, 'long_term_memory') and state.long_term_memory:
             return state.long_term_memory
         return []
-

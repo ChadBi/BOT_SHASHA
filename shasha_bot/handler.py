@@ -43,7 +43,7 @@ async def handle_message(websocket, settings: BotSettings) -> None:
         memory_config.EMOTION_DECAY_ALPHA = settings.emotion_decay_alpha
         memory_config.MAX_SELF_DESCRIPTIONS = settings.max_self_descriptions
         memory_manager = MemoryManager(config=memory_config)
-        
+
         # 如果配置了 SiliconFlow API key，初始化 LLM 情绪识别
         if settings.siliconflow_api_key:
             emotion_client = SiliconFlowEmotionClient(api_key=settings.siliconflow_api_key)
@@ -99,6 +99,7 @@ async def handle_message(websocket, settings: BotSettings) -> None:
         rate_limiter=rate_limiter,
         group_config=group_config,
     )
+
     # commands：按顺序匹配，先命中先执行
     commands = build_commands()
     pending_requests: Dict[str, ReplyContext] = {}
@@ -117,16 +118,11 @@ async def handle_message(websocket, settings: BotSettings) -> None:
             )
 
             if ctx.is_message_event and ctx.is_self_message():
-                # 忽略机器人自己发的消息，避免自我触发
+                # 忽略机器人自己发出的消息，避免自我触发
                 continue
 
             if ctx.is_message_event:
                 logger.info("收到消息 user=%s type=%s len=%s", ctx.user_id, ctx.message_type, len(ctx.raw_msg or ""))
-
-                # 记忆写入仅在“自然语言对话”路径中进行：
-                # - @我 + 文字（router.run_mentioned_text）
-                # - 随机闲聊触发（router.run_random_chitchat）
-                # 常规命令（昵称=/自述=/查看记忆/菜单等）不计入对话历史。
 
             # 交给路由系统：根据命令优先级做匹配与执行
             await dispatch(commands, ctx)

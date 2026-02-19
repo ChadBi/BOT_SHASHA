@@ -46,7 +46,7 @@ class ZhipuVision:
 
         final_prompt = (
             prompt
-            or f"{self.system_prompt},{self.vision_prompt} 请评价一下这张图片，简短一点，不要超过100个字。"
+            or f"{self.system_prompt},{self.vision_prompt} 请评价一下这张图片，简短一点，不要超过 100 个字。"
         )
 
         attempts = max(1, self.retry_attempts + 1)

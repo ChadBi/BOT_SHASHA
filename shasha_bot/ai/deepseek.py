@@ -88,12 +88,52 @@ class DeepSeekText:
         history: Optional[List[Dict[str, str]]] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt or self.system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": question})
-        logger.debug("deepseek req messages=%s", len(messages))
-        return await self._chat(messages, max_tokens=max_tokens)
+        """带上下文的多轮对话。
+
+        参数:
+            question: 当前问题
+            system_prompt: 自定义系统提示词（可选，默认用初始化时的）
+            history: 历史消息列表 [{"role": "user"/"assistant", "content": "..."}]
+            max_tokens: 自定义最大 token 数（可选）
+
+        返回:
+            模型回复文本
+        """
+        if not self.api_key:
+            return "未配置 DEEPSEEK_API_KEY"
+
+        try:
+            messages = []
+
+            # 系统提示词
+            sys_prompt = system_prompt or self.system_prompt
+            messages.append({"role": "system", "content": sys_prompt})
+
+            # 历史消息
+            if history:
+                messages.extend(history)
+
+            # 当前问题
+            messages.append({"role": "user", "content": question})
+
+            # 计算 prompt 长度（用于日志）
+            prompt_length = sum(len(m.get("content", "")) for m in messages)
+            logger.info("[deepseek] req messages=%s chars=%s", len(messages), prompt_length)
+            reply = await self._chat(messages, max_tokens=max_tokens)
+            logger.info("[deepseek] resp chars=%s", len(reply))
+            return reply
+
+        except Exception as e:
+            logger.error("[deepseek] multi-turn error: %s", e)
+            return "脑子瓦特了..."
 
     async def ask_with_messages(self, messages: List[Dict[str, str]]) -> str:
+        """直接传入完整的消息列表。
+
+        参数:
+            messages: 完整消息列表（包含 system/user/assistant）
+
+        返回:
+            模型回复文本
+        """
         return await self._chat(messages)

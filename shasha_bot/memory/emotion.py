@@ -123,7 +123,7 @@ class EmotionRecognizer:
 
     def __init__(self, llm_client: Optional["SiliconFlowEmotionClient"] = None):
         """初始化情绪识别器。
-        
+
         参数:
             llm_client: SiliconFlow 情绪识别客户端（可选）
         """
@@ -146,7 +146,7 @@ class EmotionRecognizer:
 
     async def recognize_async(self, text: str) -> UserEmotion:
         """异步识别情绪（优先使用 LLM，降级到规则）。
-        
+
         性能优化：短文本或高置信度规则匹配时跳过 LLM。
         """
         if not text or not text.strip():
@@ -159,7 +159,7 @@ class EmotionRecognizer:
 
         # 先尝试规则识别
         rule_result = self.recognize(text)
-        
+
         # 如果规则识别置信度足够高，跳过 LLM
         if rule_result.confidence >= 0.7 and rule_result.label != "neutral":
             logger.debug("emotion rules-fast -> %s", rule_result.label)

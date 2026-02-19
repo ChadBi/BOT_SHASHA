@@ -27,7 +27,7 @@ def _sync_read_json(path: Path) -> Dict[str, Any]:
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.warning("读取 %s 失败: %s", path, e)
+        logger.warning("读取 %s 失败：%s", path, e)
         return {}
 
 
@@ -38,7 +38,7 @@ def _sync_write_json(path: Path, data: Dict[str, Any]) -> bool:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
     except Exception as e:
-        logger.warning("写入 %s 失败: %s", path, e)
+        logger.warning("写入 %s 失败：%s", path, e)
         return False
 
 
