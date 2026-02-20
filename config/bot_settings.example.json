@@ -25,5 +25,8 @@
   "api_retry_attempts": 2,
   "api_retry_base_delay": 0.4,
   "circuit_breaker_fail_threshold": 3,
-  "circuit_breaker_cooldown_seconds": 30
+  "circuit_breaker_cooldown_seconds": 30,
+  "admin_user_ids": [
+    123456789
+  ]
 }

@@ -52,7 +52,7 @@ def build_commands() -> List[Command]:
     commands.append(
         FunctionCommand(
             name="mentioned_with_image",
-            _match=lambda ctx: ctx.is_message_event and (not ctx.is_self_message()) and ctx.is_mentioned and bool(ctx.img_url),
+            _match=lambda ctx: ctx.is_message_event and (not ctx.is_self_message()) and ctx.is_mentioned and bool(ctx.img_url) and ctx.is_image_enabled(),
             _run=run_mentioned_with_image,
         )
     )
@@ -76,7 +76,7 @@ def build_commands() -> List[Command]:
     commands.append(
         FunctionCommand(
             name="random_chitchat",
-            _match=lambda ctx: ctx.is_message_event and (not ctx.is_self_message()) and (not ctx.is_mentioned) and (not ctx.img_url),
+            _match=lambda ctx: ctx.is_message_event and (not ctx.is_self_message()) and (not ctx.is_mentioned) and (not ctx.img_url) and ctx.random_reply_chance() > 0,
             _run=run_random_chitchat,
         )
     )

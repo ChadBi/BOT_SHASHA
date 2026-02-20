@@ -94,6 +94,7 @@ class Services:
     image_edit: Any
     memory: Any = None  # MemoryManager，可选
     rate_limiter: Optional[SimpleRateLimiter] = None
+    group_config: Any = None
 
 
 def _send_msg_payload(
@@ -195,6 +196,35 @@ class BotContext:
     def is_self_message(self) -> bool:
         """过滤机器人自己发出的消息，避免自触发。"""
         return self.event.get("user_id") == self.event.get("self_id")
+
+    def group_behavior(self):
+        store = self.services.group_config if self.services else None
+        if store is None:
+            return None
+        return store.get(self.group_id)
+
+    def is_admin(self) -> bool:
+        if self.user_id is None:
+            return False
+        return int(self.user_id) in set(self.settings.admin_user_ids)
+
+    def is_memory_enabled(self) -> bool:
+        cfg = self.group_behavior()
+        if cfg is None:
+            return bool(self.settings.enable_memory)
+        return bool(cfg.enable_memory)
+
+    def is_image_enabled(self) -> bool:
+        cfg = self.group_behavior()
+        if cfg is None:
+            return True
+        return bool(cfg.enable_image)
+
+    def random_reply_chance(self) -> int:
+        cfg = self.group_behavior()
+        if cfg is None:
+            return max(0, int(self.settings.random_reply_chance))
+        return max(0, int(cfg.random_reply_chance))
 
     async def send_text(self, text: str, *, quote: bool = False) -> None:
         """发送纯文本消息。
@@ -354,16 +384,19 @@ async def run_reply_callback(ctx: BotContext) -> None:
     user_msg_clean = normalize_user_text(saved.raw_msg)
 
     if target_img_url:
-        logger.info("在被回复的消息中找到了图片")
-
-        if user_msg_clean.startswith("编辑="):
-            edit_prompt = user_msg_clean[3:].strip()
-            if not edit_prompt:
-                reply_text = "请在'编辑='后面加上你的修图指令哦~"
-            else:
-                reply_text = await ctx.services.image_edit.edit(target_img_url, edit_prompt)
+        if not ctx.is_image_enabled():
+            reply_text = "本群已关闭图片能力~"
         else:
-            reply_text = await ctx.services.vision.ask(target_img_url)
+            logger.info("在被回复的消息中找到了图片")
+
+            if user_msg_clean.startswith("编辑="):
+                edit_prompt = user_msg_clean[3:].strip()
+                if not edit_prompt:
+                    reply_text = "请在'编辑='后面加上你的修图指令哦~"
+                else:
+                    reply_text = await ctx.services.image_edit.edit(target_img_url, edit_prompt)
+            else:
+                reply_text = await ctx.services.vision.ask(target_img_url)
     else:
         logger.info("被回复消息无图片，转为文本回复")
         user_question = user_msg_clean or "（盯着你回复的消息看）"
@@ -371,7 +404,7 @@ async def run_reply_callback(ctx: BotContext) -> None:
         reply_text = await ctx.services.deepseek.ask(full_prompt)
 
     # 记录到 STM（如果有记忆模块）
-    if ctx.services.memory and user_id:
+    if ctx.services.memory and user_id and ctx.is_memory_enabled():
         try:
             memory = ctx.services.memory
             trigger_type = "reply_with_image" if target_img_url else "reply_text"
@@ -424,6 +457,10 @@ async def run_reply_callback(ctx: BotContext) -> None:
 
 async def run_mentioned_with_image(ctx: BotContext) -> None:
     """处理 @机器人 + 图片（集成记忆模块）。"""
+    if not ctx.is_image_enabled():
+        await ctx.send_text("本群已关闭图片能力~", quote=True)
+        return
+
     user_id = str(ctx.user_id) if ctx.user_id else None
     img_description = ctx.text or "看看这张图"
     
@@ -431,7 +468,7 @@ async def run_mentioned_with_image(ctx: BotContext) -> None:
     reply_text = await ctx.services.vision.ask(ctx.img_url or "")
     
     # 记录到 STM（如果有记忆模块）
-    if ctx.services.memory and user_id:
+    if ctx.services.memory and user_id and ctx.is_memory_enabled():
         try:
             memory = ctx.services.memory
 
@@ -500,7 +537,7 @@ async def run_mentioned_text(ctx: BotContext) -> None:
     user_id = str(ctx.user_id) if ctx.user_id else None
 
     # 如果有记忆模块，使用增强对话
-    if ctx.services.memory and user_id:
+    if ctx.services.memory and user_id and ctx.is_memory_enabled():
         try:
             memory = ctx.services.memory
 
@@ -585,7 +622,9 @@ async def run_mentioned_text(ctx: BotContext) -> None:
 
 async def run_random_chitchat(ctx: BotContext) -> None:
     """随机触发闲聊（集成记忆模块）。"""
-    chance = max(1, ctx.settings.random_reply_chance)
+    chance = ctx.random_reply_chance()
+    if chance <= 0:
+        return
     if random.randint(1, chance) != 1:
         return
     
@@ -594,7 +633,7 @@ async def run_random_chitchat(ctx: BotContext) -> None:
     question = ctx.raw_msg
 
     # 如果有记忆模块，使用增强对话
-    if ctx.services.memory and user_id:
+    if ctx.services.memory and user_id and ctx.is_memory_enabled():
         try:
             memory = ctx.services.memory
 
