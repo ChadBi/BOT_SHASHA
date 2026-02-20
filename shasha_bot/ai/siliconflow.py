@@ -59,7 +59,7 @@ class SiliconFlowEmotionClient:
             return ("neutral", 0.3, 0.9)
         
         if not self.api_key:
-            print("[siliconflow] API key 未配置，使用默认情绪")
+            logger.info("siliconflow API key 未配置，使用默认情绪")
             return ("neutral", 0.5, 0.5)
         
         try:
@@ -89,14 +89,14 @@ class SiliconFlowEmotionClient:
                 
                 # 解析 JSON 响应
                 result = self._parse_emotion_response(content)
-                print(f"[siliconflow] {text[:30]}... -> {result}")
+                logger.debug("siliconflow emotion recognized")
                 return result
                 
         except httpx.TimeoutException:
-            print(f"[siliconflow] timeout: {text[:30]}...")
+            logger.warning("siliconflow timeout")
             return ("neutral", 0.5, 0.3)
         except Exception as e:
-            print(f"[siliconflow] error: {e}")
+            logger.warning("siliconflow error: %s", e)
             return ("neutral", 0.5, 0.3)
     
     def _parse_emotion_response(self, content: str) -> Tuple[str, float, float]:
@@ -126,5 +126,5 @@ class SiliconFlowEmotionClient:
             return (label, intensity, confidence)
             
         except (json.JSONDecodeError, ValueError, KeyError) as e:
-            print(f"[siliconflow] parse failed: {e}, content={content[:100]}")
+            logger.warning("siliconflow parse failed: %s", e)
             return ("neutral", 0.5, 0.4)

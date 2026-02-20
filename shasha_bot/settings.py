@@ -50,6 +50,21 @@ class BotSettings:
     max_self_descriptions: int = 10  # 最大自述条数
     enable_memory: bool = True  # 是否启用记忆模块
 
+    # Logging
+    log_level: str = "INFO"
+
+    # Stability / throttling
+    enable_rate_limit: bool = True
+    rate_limit_window_seconds: int = 10
+    rate_limit_user_max_calls: int = 6
+    rate_limit_group_max_calls: int = 30
+
+    # API reliability
+    api_retry_attempts: int = 2
+    api_retry_base_delay: float = 0.4
+    circuit_breaker_fail_threshold: int = 3
+    circuit_breaker_cooldown_seconds: int = 30
+
 
 def _read_json_file(path: Path) -> dict[str, Any]:
     """读取 JSON 文件为 dict；文件不存在则返回空 dict。"""
@@ -57,6 +72,21 @@ def _read_json_file(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
+
+
+def _to_bool(value: Any, default: bool) -> bool:
+    """把常见输入转换为布尔值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    return default
 
 
 def load_settings(config_path: Optional[str] = None) -> BotSettings:
@@ -126,7 +156,19 @@ def load_settings(config_path: Optional[str] = None) -> BotSettings:
     except Exception:
         max_self_descriptions = 10
 
-    enable_memory = bool(pick("enable_memory", True))
+    enable_memory = _to_bool(pick("enable_memory", True), True)
+    enable_rate_limit = _to_bool(pick("enable_rate_limit", True), True)
+
+    log_level = str(pick("log_level", "INFO")).upper().strip() or "INFO"
+
+    rate_limit_window_seconds = int(pick("rate_limit_window_seconds", 10))
+    rate_limit_user_max_calls = int(pick("rate_limit_user_max_calls", 6))
+    rate_limit_group_max_calls = int(pick("rate_limit_group_max_calls", 30))
+
+    api_retry_attempts = int(pick("api_retry_attempts", 2))
+    api_retry_base_delay = float(pick("api_retry_base_delay", 0.4))
+    circuit_breaker_fail_threshold = int(pick("circuit_breaker_fail_threshold", 3))
+    circuit_breaker_cooldown_seconds = int(pick("circuit_breaker_cooldown_seconds", 30))
 
     return BotSettings(
         host=host,
@@ -147,4 +189,13 @@ def load_settings(config_path: Optional[str] = None) -> BotSettings:
         emotion_decay_alpha=emotion_decay_alpha,
         max_self_descriptions=max_self_descriptions,
         enable_memory=enable_memory,
+        log_level=log_level,
+        enable_rate_limit=enable_rate_limit,
+        rate_limit_window_seconds=rate_limit_window_seconds,
+        rate_limit_user_max_calls=rate_limit_user_max_calls,
+        rate_limit_group_max_calls=rate_limit_group_max_calls,
+        api_retry_attempts=api_retry_attempts,
+        api_retry_base_delay=api_retry_base_delay,
+        circuit_breaker_fail_threshold=circuit_breaker_fail_threshold,
+        circuit_breaker_cooldown_seconds=circuit_breaker_cooldown_seconds,
     )

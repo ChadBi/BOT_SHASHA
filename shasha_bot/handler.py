@@ -20,7 +20,7 @@ import websockets
 
 from .settings import BotSettings
 from .ai import DeepSeekText, ZhipuVision, AliyunImageEdit, SiliconFlowEmotionClient
-from .router import BotContext, ReplyContext, Services, dispatch
+from .router import BotContext, ReplyContext, Services, SimpleRateLimiter, dispatch
 from .commands import build_commands
 from .memory import MemoryManager, MemoryConfig
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 async def handle_message(websocket, settings: BotSettings) -> None:
     """处理单条 WebSocket 连接上的所有事件。"""
-    print("✅ 连接成功！")
+    logger.info("连接成功")
 
     # 初始化记忆管理器（如果启用）
     memory_manager: Optional[MemoryManager] = None
@@ -46,9 +46,9 @@ async def handle_message(websocket, settings: BotSettings) -> None:
         if settings.siliconflow_api_key:
             emotion_client = SiliconFlowEmotionClient(api_key=settings.siliconflow_api_key)
             memory_manager.emotion_recognizer.set_llm_client(emotion_client)
-            print("[memory] 记忆模块已启用（含 LLM 情绪识别）")
+            logger.info("记忆模块已启用（含 LLM 情绪识别）")
         else:
-            print("[memory] 记忆模块已启用（规则情绪识别）")
+            logger.info("记忆模块已启用（规则情绪识别）")
 
     # 统一在这里初始化外部服务（避免每条消息重复创建客户端）
     deepseek = DeepSeekText(
@@ -57,17 +57,39 @@ async def handle_message(websocket, settings: BotSettings) -> None:
         system_prompt=settings.system_prompt,
         temperature=settings.temperature,
         max_tokens=settings.max_text_tokens,
+        retry_attempts=settings.api_retry_attempts,
+        retry_base_delay=settings.api_retry_base_delay,
+        fail_threshold=settings.circuit_breaker_fail_threshold,
+        cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
     )
     vision = ZhipuVision(
         api_key=settings.zhipu_api_key,
         system_prompt=settings.system_prompt,
         vision_prompt=settings.vision_prompt,
         temperature=settings.temperature,
+        retry_attempts=settings.api_retry_attempts,
+        retry_base_delay=settings.api_retry_base_delay,
     )
-    image_edit = AliyunImageEdit(api_key=settings.aliyun_api_key)
+    image_edit = AliyunImageEdit(
+        api_key=settings.aliyun_api_key,
+        retry_attempts=settings.api_retry_attempts,
+        retry_base_delay=settings.api_retry_base_delay,
+    )
 
     # services：给命令/路由使用的"依赖注入容器"
-    services = Services(deepseek=deepseek, vision=vision, image_edit=image_edit, memory=memory_manager)
+    rate_limiter = SimpleRateLimiter(
+        enabled=settings.enable_rate_limit,
+        window_seconds=settings.rate_limit_window_seconds,
+        user_max_calls=settings.rate_limit_user_max_calls,
+        group_max_calls=settings.rate_limit_group_max_calls,
+    )
+    services = Services(
+        deepseek=deepseek,
+        vision=vision,
+        image_edit=image_edit,
+        memory=memory_manager,
+        rate_limiter=rate_limiter,
+    )
     # commands：按顺序匹配，先命中先执行
     commands = build_commands()
     pending_requests: Dict[str, ReplyContext] = {}
@@ -90,7 +112,7 @@ async def handle_message(websocket, settings: BotSettings) -> None:
                 continue
 
             if ctx.is_message_event:
-                print(f"📩 [{ctx.user_id}][{ctx.message_type}] 收到: {ctx.raw_msg}")
+                logger.info("收到消息 user=%s type=%s len=%s", ctx.user_id, ctx.message_type, len(ctx.raw_msg or ""))
 
                 # 记忆写入仅在“自然语言对话”路径中进行：
                 # - @我 + 文字（router.run_mentioned_text）
@@ -101,4 +123,4 @@ async def handle_message(websocket, settings: BotSettings) -> None:
             await dispatch(commands, ctx)
 
     except websockets.exceptions.ConnectionClosed:
-        print("⚠️ 连接断开")
+        logger.warning("连接断开")
