@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import List, Optional
 
 import httpx
 
-from .router import Command, exact_match, prefix
+from .router import Command, exact_match, prefix, regex
 from .memory import MemoryManager, format_memory_summary
 
 BING_JSON_URL = "https://raw.onmicrosoft.cn/Bing-Wallpaper-Action/main/data/zh-CN_update.json"
@@ -17,6 +16,8 @@ CACHE_DIR = Path("shasha_bot/pic")
 
 def get_memory_manager(ctx) -> Optional[MemoryManager]:
     """从 context 中获取记忆管理器。"""
+    if not ctx.is_memory_enabled():
+        return None
     if ctx.services and ctx.services.memory:
         return ctx.services.memory
     return None
@@ -42,6 +43,11 @@ MENU_TEXT = """🤖 菜单
 3、查看记忆（查看我记住的信息）
 4、清除自述（清除你的自述）
 5、清除记忆（清除短期记忆和自述）
+
+【管理员】
+1、设置随机率=数字（0 表示关闭随机闲聊）
+2、开关记忆=开/关
+3、查看运行状态
 """
 
 
@@ -199,10 +205,90 @@ async def _view_bot_emotion(ctx):
 
 
 
+def _is_group_message(ctx) -> bool:
+    return ctx.message_type == "group" and ctx.group_id is not None
+
+
+async def _ensure_admin(ctx) -> bool:
+    if ctx.is_admin():
+        return True
+    await ctx.send_text("该命令仅管理员可用~", quote=True)
+    return False
+
+
+async def _set_random_rate(ctx):
+    if not _is_group_message(ctx):
+        await ctx.send_text("请在群聊中使用该命令~", quote=True)
+        return
+    if not await _ensure_admin(ctx):
+        return
+
+    text = (ctx.text or "").strip()
+    raw = text.split("=", 1)[1].strip() if "=" in text else ""
+    try:
+        value = int(raw)
+    except Exception:
+        await ctx.send_text("随机率格式不对，请使用：设置随机率=数字", quote=True)
+        return
+
+    if value < 0:
+        await ctx.send_text("随机率不能小于 0 哦~", quote=True)
+        return
+
+    updated = ctx.services.group_config.update_random_reply_chance(ctx.group_id, value)
+    await ctx.send_text(f"已更新本群随机率为 {updated.random_reply_chance}。", quote=True)
+
+
+async def _switch_memory(ctx):
+    if not _is_group_message(ctx):
+        await ctx.send_text("请在群聊中使用该命令~", quote=True)
+        return
+    if not await _ensure_admin(ctx):
+        return
+
+    text = (ctx.text or "").strip()
+    value = text.split("=", 1)[1].strip() if "=" in text else ""
+    if value not in {"开", "关"}:
+        await ctx.send_text("格式应为：开关记忆=开 或 开关记忆=关", quote=True)
+        return
+
+    enabled = value == "开"
+    updated = ctx.services.group_config.update_enable_memory(ctx.group_id, enabled)
+    await ctx.send_text(f"本群记忆功能已{'开启' if updated.enable_memory else '关闭'}。", quote=True)
+
+
+async def _view_runtime_status(ctx):
+    if not _is_group_message(ctx):
+        await ctx.send_text("请在群聊中使用该命令~", quote=True)
+        return
+    if not await _ensure_admin(ctx):
+        return
+
+    cfg = ctx.group_behavior()
+    if cfg is None:
+        await ctx.send_text("未加载群配置。", quote=True)
+        return
+
+    await ctx.send_text(
+        "\n".join(
+            [
+                "📊 本群运行状态",
+                f"- 随机闲聊随机率: {cfg.random_reply_chance}",
+                f"- 记忆功能: {'开' if cfg.enable_memory else '关'}",
+                f"- 图片功能: {'开' if cfg.enable_image else '关'}",
+                f"- 全局记忆模块: {'已加载' if ctx.services.memory else '未加载'}",
+            ]
+        ),
+        quote=True,
+    )
+
 
 CUSTOM_COMMANDS: List[Command] = [
     exact_match("daily_img", "每日一图", _daily_img, require_mentioned=False),
     exact_match("menu", "菜单", _menu, require_mentioned=False),
+    regex("admin_set_random_rate", r"^设置随机率\s*=", _set_random_rate, require_mentioned=False),
+    regex("admin_switch_memory", r"^开关记忆\s*=", _switch_memory, require_mentioned=False),
+    exact_match("admin_view_runtime_status", "查看运行状态", _view_runtime_status, require_mentioned=False),
     # 记忆相关命令（需要 @）
     prefix("set_nickname", "昵称=", _set_nickname, require_mentioned=True),
     prefix("add_self_desc", "自述=", _add_self_desc, require_mentioned=True),

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Dict, Optional
 
 import websockets
@@ -23,6 +24,7 @@ from .ai import DeepSeekText, ZhipuVision, AliyunImageEdit, SiliconFlowEmotionCl
 from .router import BotContext, ReplyContext, Services, SimpleRateLimiter, dispatch
 from .commands import build_commands
 from .memory import MemoryManager, MemoryConfig
+from .group_config import GroupConfigStore
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +85,19 @@ async def handle_message(websocket, settings: BotSettings) -> None:
         user_max_calls=settings.rate_limit_user_max_calls,
         group_max_calls=settings.rate_limit_group_max_calls,
     )
+    group_config = GroupConfigStore(
+        path=Path("config/group_settings.json"),
+        default_random_reply_chance=settings.random_reply_chance,
+        default_enable_memory=settings.enable_memory,
+    )
+
     services = Services(
         deepseek=deepseek,
         vision=vision,
         image_edit=image_edit,
         memory=memory_manager,
         rate_limiter=rate_limiter,
+        group_config=group_config,
     )
     # commands：按顺序匹配，先命中先执行
     commands = build_commands()

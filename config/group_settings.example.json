@@ -1,0 +1,12 @@
+{
+  "private": {
+    "random_reply_chance": 200,
+    "enable_memory": true,
+    "enable_image": true
+  },
+  "123456789": {
+    "random_reply_chance": 100,
+    "enable_memory": true,
+    "enable_image": true
+  }
+}

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,9 @@ class BotSettings:
     api_retry_base_delay: float = 0.4
     circuit_breaker_fail_threshold: int = 3
     circuit_breaker_cooldown_seconds: int = 30
+
+    # Admin
+    admin_user_ids: Tuple[int, ...] = ()
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -170,6 +173,15 @@ def load_settings(config_path: Optional[str] = None) -> BotSettings:
     circuit_breaker_fail_threshold = int(pick("circuit_breaker_fail_threshold", 3))
     circuit_breaker_cooldown_seconds = int(pick("circuit_breaker_cooldown_seconds", 30))
 
+    admin_user_ids_raw = pick("admin_user_ids", [])
+    admin_user_ids: list[int] = []
+    if isinstance(admin_user_ids_raw, list):
+        for uid in admin_user_ids_raw:
+            try:
+                admin_user_ids.append(int(uid))
+            except Exception:
+                continue
+
     return BotSettings(
         host=host,
         port=port,
@@ -198,4 +210,5 @@ def load_settings(config_path: Optional[str] = None) -> BotSettings:
         api_retry_base_delay=api_retry_base_delay,
         circuit_breaker_fail_threshold=circuit_breaker_fail_threshold,
         circuit_breaker_cooldown_seconds=circuit_breaker_cooldown_seconds,
+        admin_user_ids=tuple(admin_user_ids),
     )
