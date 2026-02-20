@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -31,6 +32,8 @@ def main() -> None:
         )
 
     settings = load_settings(str(default_config))
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     asyncio.run(run_server(settings))
 
 

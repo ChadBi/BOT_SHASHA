@@ -11,12 +11,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Protocol
+from collections import deque
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, List, Optional, Protocol
 
 from .cq import extract_image_url, extract_reply_id, contains_at, normalize_user_text
 from .memory.prompt import build_system_context, build_chat_messages
@@ -33,6 +36,47 @@ class ReplyContext:
     message_type: str
     message_id: int
     raw_msg: str
+    created_at: float = 0.0
+
+
+
+
+class SimpleRateLimiter:
+    """简单滑动窗口限流（用户/群）。"""
+
+    def __init__(self, *, enabled: bool, window_seconds: int, user_max_calls: int, group_max_calls: int):
+        self.enabled = enabled
+        self.window_seconds = max(1, int(window_seconds))
+        self.user_max_calls = max(1, int(user_max_calls))
+        self.group_max_calls = max(1, int(group_max_calls))
+        self._user_calls: Dict[str, Deque[float]] = {}
+        self._group_calls: Dict[str, Deque[float]] = {}
+
+    def _evict_old(self, q: Deque[float], now: float) -> None:
+        threshold = now - self.window_seconds
+        while q and q[0] < threshold:
+            q.popleft()
+
+    def _allow(self, store: Dict[str, Deque[float]], key: str, limit: int) -> bool:
+        now = time.time()
+        q = store.setdefault(key, deque())
+        self._evict_old(q, now)
+        if len(q) >= limit:
+            return False
+        q.append(now)
+        return True
+
+    def allow(self, *, user_id: int | None, group_id: int | None) -> bool:
+        if not self.enabled:
+            return True
+
+        if user_id is not None and not self._allow(self._user_calls, str(user_id), self.user_max_calls):
+            return False
+
+        if group_id is not None and not self._allow(self._group_calls, str(group_id), self.group_max_calls):
+            return False
+
+        return True
 
 
 @dataclass
@@ -49,6 +93,7 @@ class Services:
     vision: Any
     image_edit: Any
     memory: Any = None  # MemoryManager，可选
+    rate_limiter: Optional[SimpleRateLimiter] = None
 
 
 def _send_msg_payload(
@@ -256,8 +301,33 @@ def regex(name: str, pattern: str, run: RunFunc, *, require_mentioned: bool = Fa
     return FunctionCommand(name=name, _match=_match, _run=run)
 
 
+def cleanup_expired_pending_requests(pending_requests: Dict[str, ReplyContext], ttl_seconds: float = 60.0) -> None:
+    """清理超时的 reply 回调上下文。"""
+    now = time.time()
+    expired = [
+        key
+        for key, value in pending_requests.items()
+        if value.created_at and now - value.created_at > ttl_seconds
+    ]
+    for key in expired:
+        pending_requests.pop(key, None)
+    if expired:
+        logger.debug("cleaned expired pending requests: count=%s", len(expired))
+
+
+
+
 async def dispatch(commands: Iterable[Command], ctx: BotContext) -> bool:
     """按顺序匹配命令并执行；有命令返回 True 即停止。"""
+    cleanup_expired_pending_requests(ctx.pending_requests)
+
+    if ctx.is_message_event and ctx.services.rate_limiter:
+        allowed = ctx.services.rate_limiter.allow(user_id=ctx.user_id, group_id=ctx.group_id)
+        if not allowed:
+            await ctx.send_text("消息有点多啦，稍等一下再试试吧~", quote=True)
+            logger.info("rate-limited: user=%s group=%s", ctx.user_id, ctx.group_id)
+            return True
+
     for cmd in commands:
         if cmd.match(ctx):
             handled = await cmd.run(ctx)
@@ -275,7 +345,7 @@ async def run_reply_callback(ctx: BotContext) -> None:
     if not saved:
         return
 
-    print(f"🔄 收到 get_msg 响应: {echo_id}")
+    logger.info("收到 get_msg 响应: %s", echo_id)
     msg_data = ctx.event.get("data", {})
     target_msg = msg_data.get("raw_message") or str(msg_data.get("message", ""))
     user_id = str(saved.user_id) if saved.user_id else None
@@ -284,7 +354,7 @@ async def run_reply_callback(ctx: BotContext) -> None:
     user_msg_clean = normalize_user_text(saved.raw_msg)
 
     if target_img_url:
-        print("🕵️ 在被回复的消息中找到了图片！")
+        logger.info("在被回复的消息中找到了图片")
 
         if user_msg_clean.startswith("编辑="):
             edit_prompt = user_msg_clean[3:].strip()
@@ -295,7 +365,7 @@ async def run_reply_callback(ctx: BotContext) -> None:
         else:
             reply_text = await ctx.services.vision.ask(target_img_url)
     else:
-        print("⚠️ 被回复的消息里没有图片，转为普通文本回复...")
+        logger.info("被回复消息无图片，转为文本回复")
         user_question = user_msg_clean or "（盯着你回复的消息看）"
         full_prompt = f"我回复了消息：'{target_msg}'。\n我的评论是：{user_question}"
         reply_text = await ctx.services.deepseek.ask(full_prompt)
@@ -311,7 +381,7 @@ async def run_reply_callback(ctx: BotContext) -> None:
                 emotion_text = user_msg_clean or "（回复了一条消息）"
                 user_emotion = await memory.emotion_recognizer.recognize_async(emotion_text)
             except Exception as emo_err:
-                print(f"[emotion] 回复场景情绪识别失败: {emo_err}")
+                logger.warning("回复场景情绪识别失败: %s", emo_err)
                 user_emotion = None
             
             # 记录用户回复行为
@@ -339,13 +409,10 @@ async def run_reply_callback(ctx: BotContext) -> None:
             # 更新并打印机器人情绪
             if user_emotion is not None:
                 bot_state = await memory.update_bot_emotion(user_emotion, user_id)
-                print(
-                    f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
-                    f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
-                )
-            print(f"[chat] {trigger_type} user={user_id} reply_len={len(reply_text)}")
+                logger.debug("bot_emotion tone=%s V=%.2f A=%.2f D=%.2f", bot_state.get_suggested_tone(), bot_state.V, bot_state.A, bot_state.D)
+            logger.info("%s user=%s reply_len=%s", trigger_type, user_id, len(reply_text))
         except Exception as e:
-            print(f"[chat] 回复场景记忆写入失败: {e}")
+            logger.warning("回复场景记忆写入失败: %s", e)
 
     payload = _send_msg_payload(
         user_id=saved.user_id,
@@ -372,7 +439,7 @@ async def run_mentioned_with_image(ctx: BotContext) -> None:
             try:
                 user_emotion = await memory.emotion_recognizer.recognize_async(img_description)
             except Exception as emo_err:
-                print(f"[emotion] 图片场景情绪识别失败: {emo_err}")
+                logger.warning("图片场景情绪识别失败: %s", emo_err)
                 user_emotion = None
             
             # 记录用户发图行为
@@ -400,13 +467,10 @@ async def run_mentioned_with_image(ctx: BotContext) -> None:
             # 更新并打印机器人情绪
             if user_emotion is not None:
                 bot_state = await memory.update_bot_emotion(user_emotion, user_id)
-                print(
-                    f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
-                    f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
-                )
-            print(f"[chat] mentioned_with_image user={user_id} reply_len={len(reply_text)}")
+                logger.debug("bot_emotion tone=%s V=%.2f A=%.2f D=%.2f", bot_state.get_suggested_tone(), bot_state.V, bot_state.A, bot_state.D)
+            logger.info("mentioned_with_image user=%s reply_len=%s", user_id, len(reply_text))
         except Exception as e:
-            print(f"[chat] 图片场景记忆写入失败: {e}")
+            logger.warning("图片场景记忆写入失败: %s", e)
     
     await ctx.send_text(reply_text, quote=True)
 
@@ -416,7 +480,7 @@ async def run_mentioned_with_reply(ctx: BotContext) -> None:
     if ctx.message_id is None or not ctx.reply_id:
         return
 
-    print(f"🔗 检测到回复消息，正在获取原消息内容 (ID: {ctx.reply_id})...")
+    logger.info("检测到回复消息，正在获取原消息内容: id=%s", ctx.reply_id)
     echo_id = f"reply_check_{ctx.message_id}"
     ctx.pending_requests[echo_id] = ReplyContext(
         user_id=ctx.user_id,
@@ -424,6 +488,7 @@ async def run_mentioned_with_reply(ctx: BotContext) -> None:
         message_type=ctx.message_type,
         message_id=ctx.message_id,
         raw_msg=ctx.raw_msg,
+        created_at=time.time(),
     )
     req = {"action": "get_msg", "params": {"message_id": ctx.reply_id}, "echo": echo_id}
     await ctx.send_payload(req)
@@ -492,25 +557,24 @@ async def run_mentioned_text(ctx: BotContext) -> None:
             # 7. 更新关系和情绪
             await memory.update_relation_on_interaction(user_id)
             bot_state = await memory.update_bot_emotion(user_emotion, user_id)
-            print(
-                f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
-                f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
-            )
+            logger.debug("bot_emotion tone=%s V=%.2f A=%.2f D=%.2f", bot_state.get_suggested_tone(), bot_state.V, bot_state.A, bot_state.D)
 
             if user_emotion.label in ("angry", "disgust") and user_emotion.intensity > 0.6:
                 await memory.update_relation_on_negative_emotion(user_id, user_emotion.intensity)
 
             # 8. 异步任务：LTM提取和人格分析（不阻塞回复）
-            try:
-                await memory.extract_ltm_from_stm(user_id)
-                await memory.maybe_update_personality(user_id, ctx.services.deepseek)
-            except Exception as bg_err:
-                print(f"[chat] 后台任务失败: {bg_err}")
+            async def _post_reply_tasks() -> None:
+                try:
+                    await memory.extract_ltm_from_stm(user_id)
+                    await memory.maybe_update_personality(user_id, ctx.services.deepseek)
+                except Exception as bg_err:
+                    logger.warning("后台任务失败: %s", bg_err)
 
-            print(f"[chat] mentioned_text user={user_id} emo={user_emotion.label} reply_len={len(reply_text)}")
+            asyncio.create_task(_post_reply_tasks())
+            logger.info("mentioned_text user=%s emo=%s reply_len=%s", user_id, user_emotion.label, len(reply_text))
 
         except Exception as e:
-            print(f"[chat] 记忆模块对话失败，降级到普通模式: {e}")
+            logger.warning("记忆模块对话失败，降级到普通模式: %s", e)
             reply_text = await ctx.services.deepseek.ask(question)
     else:
         # 无记忆模块，使用普通模式
@@ -525,7 +589,7 @@ async def run_random_chitchat(ctx: BotContext) -> None:
     if random.randint(1, chance) != 1:
         return
     
-    print("🤖 随机触发闲聊...")
+    logger.info("随机触发闲聊")
     user_id = str(ctx.user_id) if ctx.user_id else None
     question = ctx.raw_msg
 
@@ -589,18 +653,15 @@ async def run_random_chitchat(ctx: BotContext) -> None:
 
             # 8. 更新并打印机器人情绪
             bot_state = await memory.update_bot_emotion(user_emotion, user_id)
-            print(
-                f"[bot_emotion] tone={bot_state.get_suggested_tone()} "
-                f"V={bot_state.V:.2f} A={bot_state.A:.2f} D={bot_state.D:.2f}"
-            )
+            logger.debug("bot_emotion tone=%s V=%.2f A=%.2f D=%.2f", bot_state.get_suggested_tone(), bot_state.V, bot_state.A, bot_state.D)
 
             if user_emotion.label in ("angry", "disgust") and user_emotion.intensity > 0.6:
                 await memory.update_relation_on_negative_emotion(user_id, user_emotion.intensity)
 
-            print(f"[chat] random_chitchat user={user_id} emo={user_emotion.label} reply_len={len(reply_text)}")
+            logger.info("random_chitchat user=%s emo=%s reply_len=%s", user_id, user_emotion.label, len(reply_text))
 
         except Exception as e:
-            print(f"[chat] 记忆模块闲聊失败，降级到普通模式: {e}")
+            logger.warning("记忆模块闲聊失败，降级到普通模式: %s", e)
             reply_text = await ctx.services.deepseek.ask(question)
     else:
         # 无记忆模块，使用普通模式

@@ -162,20 +162,20 @@ class EmotionRecognizer:
         
         # 如果规则识别置信度足够高，跳过 LLM
         if rule_result.confidence >= 0.7 and rule_result.label != "neutral":
-            print(f"[emotion][rules-fast] {text[:30]}... -> {rule_result.label} ({rule_result.intensity:.2f})")
+            logger.debug("emotion rules-fast -> %s", rule_result.label)
             return rule_result
 
         # 尝试使用 LLM
         if self._use_llm and self._llm_client:
             try:
                 label, intensity, confidence = await self._llm_client.recognize_emotion(text)
-                print(f"[emotion][llm] {text[:30]}... -> {label} ({intensity:.2f})")
+                logger.debug("emotion llm -> %s", label)
                 return UserEmotion(label=label, intensity=intensity, confidence=confidence)
             except Exception as e:
-                print(f"[emotion][llm] failed, fallback to rules: {e}")
+                logger.warning("emotion llm failed, fallback rules: %s", e)
 
         # 降级到规则识别结果
-        print(f"[emotion][rules] {text[:30]}... -> {rule_result.label} ({rule_result.intensity:.2f})")
+        logger.debug("emotion rules -> %s", rule_result.label)
         return rule_result
 
     def recognize(self, text: str) -> UserEmotion:

@@ -177,7 +177,7 @@ class MemoryManager:
         state = await self.get_user_state(user_id)
         state.profile.nickname = nickname
         await self.save_user_state(user_id)
-        print(f"[memory] 用户 {user_id} 昵称已设置为: {nickname}")
+        logger.info("用户 %s 昵称已设置", user_id)
 
     async def add_self_description(self, user_id: str, desc: str) -> bool:
         """添加用户自述（返回是否成功）。"""
@@ -190,7 +190,7 @@ class MemoryManager:
 
         state.profile.self_descriptions.append(desc)
         await self.save_user_state(user_id)
-        print(f"[memory] 用户 {user_id} 添加自述: {desc[:50]}...")
+        logger.info("用户 %s 添加自述", user_id)
         return True
 
     async def clear_self_descriptions(self, user_id: str) -> None:
@@ -198,14 +198,14 @@ class MemoryManager:
         state = await self.get_user_state(user_id)
         state.profile.self_descriptions.clear()
         await self.save_user_state(user_id)
-        print(f"[memory] 用户 {user_id} 自述已清除")
+        logger.info("用户 %s 自述已清除", user_id)
 
     async def clear_stm(self, user_id: str) -> None:
         """清除短期记忆。"""
         state = await self.get_user_state(user_id)
         state.short_term_memory.clear()
         await self.save_user_state(user_id)
-        print(f"[memory] 用户 {user_id} 短期记忆已清除")
+        logger.info("用户 %s 短期记忆已清除", user_id)
 
     # ================= 关系更新 =================
 
@@ -289,7 +289,7 @@ class MemoryManager:
         state = await self.get_user_state(user_id)
         state.personality = factors
         await self.mark_personality_updated(user_id)
-        print(f"[memory] 用户 {user_id} 人格因子已更新: {factors}")
+        logger.info("用户 %s 人格因子已更新", user_id)
 
     # ================= 便捷查询 =================
 
@@ -354,7 +354,7 @@ class MemoryManager:
         stm = state.short_term_memory
         
         if len(stm) < 10:
-            print(f"[personality] 用户 {user_id} 消息不足，跳过分析")
+            logger.debug("用户 %s 消息不足，跳过人格分析", user_id)
             return None
         
         prompt = self.build_personality_analysis_prompt(stm)
@@ -379,11 +379,11 @@ class MemoryManager:
                 politeness=max(0.0, min(1.0, float(data.get("politeness", 0.5)))),
             )
             
-            print(f"[personality] 用户 {user_id} 人格分析完成: {factors}")
+            logger.info("用户 %s 人格分析完成", user_id)
             return factors
             
         except Exception as e:
-            print(f"[personality] 用户 {user_id} 人格分析失败: {e}")
+            logger.warning("用户 %s 人格分析失败: %s", user_id, e)
             return None
 
     async def maybe_update_personality(self, user_id: str, llm_client) -> bool:
@@ -456,7 +456,7 @@ class MemoryManager:
         
         if extracted:
             await self.save_user_state(user_id)
-            print(f"[ltm] 用户 {user_id} 提取了 {len(extracted)} 条长期记忆")
+            logger.info("用户 %s 提取长期记忆: %s 条", user_id, len(extracted))
         
         return extracted
 
