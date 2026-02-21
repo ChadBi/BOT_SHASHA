@@ -23,4 +23,11 @@ class Handler(Protocol):
         ...
 
 
-__all__ = ["Handler"]
+# 导入具体处理器
+from .text import TextHandler
+from .image import ImageHandler
+from .reply import ReplyHandler, ReplyCallbackHandler
+from .chitchat import ChitchatHandler
+
+
+__all__ = ["Handler", "TextHandler", "ImageHandler", "ReplyHandler", "ReplyCallbackHandler", "ChitchatHandler"]
