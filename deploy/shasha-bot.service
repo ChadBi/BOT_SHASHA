@@ -1,0 +1,25 @@
+[Unit]
+Description=Shasha Bot - QQ 机器人
+After=network.target
+
+[Service]
+Type=simple
+# 修改为你的用户名
+User=your-username
+# 修改为项目绝对路径
+WorkingDirectory=/home/your-username/BOT_SHASHA
+Environment="PATH=/home/your-username/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# 修改为 uv 的实际路径
+ExecStart=/home/your-username/.local/bin/uv run python run_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shasha-bot
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
